@@ -1,13 +1,28 @@
 # SAR Engine Manager & API Service
 
-A standalone, single-user system that allows users to upload documents, automatically extract them into FAQ pairs using an LLM, review/edit the extraction in an Admin UI, ingest them into Qdrant, and query them using a highly-optimized hybrid dense-sparse RAG pipeline.
+A standalone, single-user system that allows users to upload documents, automatically extract them into FAQ pairs using an LLM or a cleaned rule-based approach, review/edit the extraction in a modular Admin UI, ingest them into Qdrant, and query them using a highly-optimized hybrid dense-sparse RAG pipeline.
 
 ---
 
 ## System Components
 
-1. **FastAPI Backend (`backend/`)**: Manages file text extraction (with page numbers), customizable LLM FAQ generation (by language and count), query expansion (paraphrasing questions x5 before embedding), Qdrant collection creation (dense + sparse configurations), and handles dynamic query endpoints (`/api/v1/query/{collection_name}`) with tokenization, retrieval, and CrossEncoder reranking. The backend calculates OpenAI API cost estimations and automatically exports ingested FAQs to local CSV files for record-keeping.
-2. **Vue 3 Admin Frontend (`frontend/`)**: Provides drag-and-drop multi-document ingestion staging, configurable extraction settings (language, target question count), sequential processing with progress tracking, an interactive FAQ review grid, and an API Playground to test retrieval metrics and inspect match types.
+1. **FastAPI Backend (`backend/`)**: 
+   - Manages text extraction (with page numbers) from uploaded files.
+   - Generates customizable LLM FAQs (by language and count) or cleans rule-based extractions with an LLM for grammar, context, and formatting.
+   - Calculates OpenAI API cost estimations dynamically.
+   - Handles query expansion (paraphrasing questions x5 before embedding).
+   - Manages Qdrant collection creation (dense + sparse configurations).
+   - Serves dynamic query endpoints (`/api/v1/query/{collection_name}`) with tokenization, retrieval, and CrossEncoder reranking.
+   - Automatically exports ingested FAQs to local CSV files for record-keeping.
+   - Exposes a retrieval endpoint to fetch live FAQ samples directly from collections in Qdrant.
+
+2. **Vue 3 Admin Frontend (`frontend/`)**: 
+   - Provides a modular, senior-architected user interface.
+   - **Ingestion Panel**: Drag-and-drop multi-document ingestion staging, settings configuration (language, question quantity), step-by-step sequential progress tracking, and interactive FAQ editing grid.
+   - **Manual FAQ Additions**: Allows users to manually create new FAQ pairs on-the-fly before final vector database ingestion.
+   - **System Dashboard**: Displays active collections, total FAQ points count, active statuses, and supports interactive clicking on collections to inspect live FAQ pairs stored inside Qdrant.
+   - **API Playground**: Allows developers to test retrieval metrics, query terms, and inspect match types.
+
 3. **Qdrant Vector Database**: Storing and retrieving collections in hybrid mode (OpenAI Embeddings + BM25 Sparse Embeddings).
 
 ---

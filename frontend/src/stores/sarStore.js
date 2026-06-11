@@ -21,6 +21,11 @@ export const useSarStore = defineStore('sar', {
     processedFiles: 0,
     currentFileName: '',
     
+    // Staging and settings
+    targetMode: 'create', // 'create' or 'append'
+    newDbName: '',
+    pendingFiles: [],
+    
     filename: '', // Just for keeping some legacy stuff if needed, though we track multi-files now
     extractedFaqs: [],
     
@@ -159,6 +164,36 @@ export const useSarStore = defineStore('sar', {
       }
     },
     
+    async processStagedFiles() {
+      this.error = null
+      
+      if (this.pendingFiles.length === 0) {
+        this.error = "No files to process."
+        return
+      }
+
+      // 1. Determine target collection name
+      let targetCollection = ""
+      if (this.targetMode === "create") {
+        const rawName = this.newDbName.trim()
+        targetCollection = rawName.toLowerCase().replace(/[^a-z0-9_-]/g, "_")
+      } else {
+        targetCollection = this.selectedCollection
+      }
+
+      // 2. If in create mode, create the collection first
+      if (this.targetMode === "create") {
+        const success = await this.createNewCollection(targetCollection)
+        if (!success) return
+      }
+
+      this.selectedCollection = targetCollection
+
+      // 3. Run FAQ extraction
+      await this.extractFaqs(this.pendingFiles)
+      this.pendingFiles = [] // clear staging
+    },
+    
     async ingestApprovedFaqs(collectionName) {
       this.error = null
       this.statusStep = 4 // Step 4: Embedding & Ingestion
@@ -202,6 +237,8 @@ export const useSarStore = defineStore('sar', {
       this.currentFileName = ''
       this.totalExtractionCost = 0.0
       this.totalExpansionCost = 0.0
+      this.pendingFiles = []
+      this.newDbName = ''
     },
     
     async queryCollection(collectionName, query, chatHistory = []) {
