@@ -22,6 +22,7 @@ from app.rule_faq_generator import extract_faqs_rules
 from app.language_utils import detect_language, get_db_language
 from fastapi.responses import StreamingResponse
 from qdrant_client import QdrantClient
+from qdrant_client.http import models as qmodels
 from app.config import QDRANT_URL
 
 app = FastAPI(
@@ -59,6 +60,21 @@ class QueryRequest(BaseModel):
     query: str
     chat_history: List[Dict[str, str]] = []
     allow_own_knowledge: Optional[bool] = None
+
+class DeleteFaqRequest(BaseModel):
+    point_ids: List[str]
+
+class ManageFaqItem(BaseModel):
+    point_ids: List[str] = []  # existing variation point ids to replace (empty = brand new FAQ)
+    category: str = ""
+    question: str
+    answer: str
+    filename: Optional[str] = ""
+    source_type: Optional[str] = "Manual"
+
+class SaveFaqsRequest(BaseModel):
+    upserts: List[ManageFaqItem] = []
+    language: str = "Thai"
 
 @app.get("/api/v1/collections")
 async def api_get_collections():
@@ -365,4 +381,132 @@ async def api_get_collection_faqs(collection_name: str, limit: int = 100):
         return {"faqs": faqs}
     except Exception as e:
         print(f"[main] Error getting FAQs for '{collection_name}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/collections/{collection_name}/faqs/grouped")
+async def api_get_collection_faqs_grouped(collection_name: str):
+    """Returns existing FAQs grouped by their original question (one card per FAQ).
+
+    Each group carries the list of underlying Qdrant point ids (original + every
+    expanded question variation) so the UI can edit/delete the whole FAQ at once.
+    """
+    try:
+        client = QdrantClient(url=QDRANT_URL)
+        groups: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+
+        offset = None
+        while True:
+            records, next_page = client.scroll(
+                collection_name=collection_name,
+                limit=100,
+                offset=offset,
+                with_payload=True,
+            )
+            for record in records:
+                payload = record.payload or {}
+                metadata = payload.get("metadata", {})
+                orig_q = metadata.get("original_question", "")
+                # Fall back to the variation question if no original is stored.
+                if not orig_q:
+                    page_content = payload.get("page_content", "")
+                    for line in page_content.split("\n"):
+                        if line.startswith("Question: "):
+                            orig_q = line[len("Question: "):]
+                            break
+                key = orig_q or str(record.id)
+                if key not in groups:
+                    groups[key] = {
+                        "category": metadata.get("category", ""),
+                        "question": orig_q,
+                        "answer": metadata.get("answer", ""),
+                        "filename": metadata.get("source_file", ""),
+                        "source_type": metadata.get("source_type", "LLM"),
+                        "point_ids": [],
+                    }
+                    order.append(key)
+                groups[key]["point_ids"].append(str(record.id))
+
+            if next_page is None:
+                break
+            offset = next_page
+
+        return {"faqs": [groups[k] for k in order]}
+    except Exception as e:
+        print(f"[main] Error getting grouped FAQs for '{collection_name}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/collections/{collection_name}/faqs/delete")
+async def api_delete_faq(collection_name: str, req: DeleteFaqRequest):
+    """Deletes the given Qdrant points (all variations of one FAQ)."""
+    if not req.point_ids:
+        raise HTTPException(status_code=400, detail="No point ids provided")
+    try:
+        client = QdrantClient(url=QDRANT_URL)
+        client.delete(
+            collection_name=collection_name,
+            points_selector=qmodels.PointIdsList(points=req.point_ids),
+        )
+        return {"status": "success", "deleted": len(req.point_ids)}
+    except Exception as e:
+        print(f"[main] Error deleting FAQ points in '{collection_name}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/collections/{collection_name}/faqs/save")
+async def api_save_faqs(collection_name: str, req: SaveFaqsRequest):
+    """Adds new FAQs and/or replaces edited ones in an existing collection.
+
+    For edited items the caller passes the old variation point ids, which are
+    removed before the edited FAQ is re-expanded and re-embedded.
+    """
+    if not req.upserts:
+        raise HTTPException(status_code=400, detail="Nothing to save")
+    try:
+        client = QdrantClient(url=QDRANT_URL)
+
+        # 1. Remove the old points for any edited FAQs.
+        ids_to_replace = [pid for item in req.upserts for pid in item.point_ids]
+        if ids_to_replace:
+            client.delete(
+                collection_name=collection_name,
+                points_selector=qmodels.PointIdsList(points=ids_to_replace),
+            )
+
+        # 2. Expand (paraphrase x5) the new/edited FAQs.
+        faqs_to_expand = []
+        for item in req.upserts:
+            faqs_to_expand.append({
+                "category": item.category,
+                "question": item.question,
+                "answer": item.answer,
+                "filename": item.filename or "Manual Entry",
+                "source_type": item.source_type or "Manual",
+                "original_question": item.question,
+            })
+        expanded_faqs, expansion_cost = expand_faq_questions(faqs_to_expand, language=req.language)
+
+        # 3. Embed + store.
+        docs = []
+        for faq in expanded_faqs:
+            page_content = f"Question: {faq['question']}\nAnswer: {faq['answer']}"
+            metadata = {
+                "category": faq.get("category", ""),
+                "original_question": faq.get("original_question", faq.get("question", "")),
+                "answer": faq.get("answer", ""),
+                "source_file": faq.get("filename") or "Manual Entry",
+                "source_type": faq.get("source_type", "Manual"),
+            }
+            docs.append(Document(page_content=page_content, metadata=metadata))
+
+        store = get_vector_store(collection_name)
+        store.add_documents(docs)
+
+        return {
+            "status": "success",
+            "added": len(docs),
+            "replaced": len(ids_to_replace),
+            "expansion_cost": expansion_cost,
+        }
+    except Exception as e:
+        print(f"[main] Error saving FAQs in '{collection_name}': {e}")
         raise HTTPException(status_code=500, detail=str(e))

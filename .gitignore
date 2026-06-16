@@ -31,6 +31,10 @@ dist-ssr/
 backend/qdrant_storage/
 backend/app/collections_registry.json
 
+# Auto-generated FAQ exports & runtime app data
+backend/exports/
+backend/appdata/
+
 # Logs
 logs/
 *.log

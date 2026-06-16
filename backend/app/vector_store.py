@@ -8,7 +8,11 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from app.config import QDRANT_URL, OPENAI_API_KEY
 
-REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "collections_registry.json")
+# Path can be overridden so the registry lives on a persistent volume (survives container recreate/reboot).
+REGISTRY_PATH = os.getenv(
+    "REGISTRY_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "collections_registry.json"),
+)
 
 # Initialize models
 embeddings = OpenAIEmbeddings(model="text-embedding-3-large", openai_api_key=OPENAI_API_KEY)

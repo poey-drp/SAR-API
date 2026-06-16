@@ -66,6 +66,7 @@ const emit = defineEmits(['delete']);
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  flex-shrink: 0; /* keep full height inside the scrollable list (no squishing) */
 }
 
 .faq-card-header {

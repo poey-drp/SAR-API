@@ -2,23 +2,33 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     container_name: sar_api_qdrant
-    ports:
-      - "6335:6333"
-      - "6336:6334"
     volumes:
       - ./backend/qdrant_storage:/qdrant/storage
+    ports:
+      # Expose Qdrant to the host on 6335 so a locally-run backend (QDRANT_URL in
+      # backend/.env) can reach it. The dockerized backend still uses qdrant:6333.
+      - "6335:6333"
     restart: always
 
   backend:
     build: ./backend
     container_name: sar_api_backend
-    ports:
-      - "8000:8000"
     env_file:
       - ./backend/.env
     environment:
+      # Override so the app talks to qdrant over the internal docker network
       - QDRANT_URL=http://qdrant:6333
       - PORT=8000
+      # Keep the collections registry on a mounted volume so it survives recreate/reboot
+      - REGISTRY_PATH=/app/appdata/collections_registry.json
+    volumes:
+      # Persist auto-exported CSVs, the collections registry, and the reranker model cache
+      - ./backend/exports:/app/exports
+      - ./backend/appdata:/app/appdata
+      - hf_cache:/root/.cache
+    ports:
+      # Optional direct API access (frontend reaches it internally as backend:8000)
+      - "8001:8000"
     depends_on:
       - qdrant
     restart: always
@@ -27,7 +37,10 @@ services:
     build: ./frontend
     container_name: sar_api_frontend
     ports:
-      - "80:80"
+      - "8088:80"
     depends_on:
       - backend
     restart: always
+
+volumes:
+  hf_cache:

@@ -23,7 +23,7 @@
 </template>
 
 <script setup>
-import { onMounted } from "vue";
+import { onMounted, watch } from "vue";
 import { useSarStore } from "../stores/sarStore";
 import IngestionSidebar from "./ingestion/IngestionSidebar.vue";
 import IngestionTimeline from "./ingestion/IngestionTimeline.vue";
@@ -34,6 +34,21 @@ const store = useSarStore();
 onMounted(() => {
   store.fetchCollections();
 });
+
+// Load the existing FAQ list whenever an existing DB is targeted while idle,
+// so the grid can manage (add/edit/delete) entries already in the collection.
+watch(
+  () => [store.targetMode, store.selectedCollection, store.statusStep],
+  ([mode, collection, step]) => {
+    if (step === 0 && mode === "append" && collection) {
+      store.loadExistingFaqs(collection);
+    } else {
+      store.managingExisting = false;
+      store.existingFaqs = [];
+    }
+  },
+  { immediate: true }
+);
 </script>
 
 <style scoped>

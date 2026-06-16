@@ -1,7 +1,65 @@
 <template>
   <div class="right-column panel-card min-h-500">
+    <!-- Manage existing collection FAQs (add / edit / delete) -->
+    <div
+      v-if="store.statusStep === 0 && store.managingExisting"
+      class="faq-review-container"
+    >
+      <div v-if="store.existingLoading" class="empty-review-state">
+        <div class="spinner big-spinner mb-4"></div>
+        <h2>Loading FAQs from "{{ store.selectedCollection }}"...</h2>
+      </div>
+      <template v-else>
+        <div class="faq-review-header">
+          <div>
+            <h2>Manage FAQs — {{ store.selectedCollection }}</h2>
+            <p class="text-xs text-muted mt-1">
+              {{ store.existingFaqs.length }} FAQ(s) in this database. Add, edit,
+              or delete entries below.
+            </p>
+          </div>
+          <div class="action-buttons">
+            <button class="btn-secondary action-add" @click="addManualExisting">
+              ➕ Add manually
+            </button>
+            <button
+              class="btn-primary action-save"
+              :disabled="store.savingExisting"
+              @click="store.saveExistingChanges()"
+            >
+              <span v-if="store.savingExisting" class="spinner w-4 h-4"></span>
+              <span v-else>💾 Save Changes ({{ store.existingPendingCount() }})</span>
+            </button>
+          </div>
+        </div>
+
+        <div v-if="store.existingFaqs.length === 0" class="empty-review-state">
+          <div class="empty-review-icon">📭</div>
+          <p class="max-w-400 text-sm">
+            This database has no FAQ entries yet. Click "Add manually" or upload a
+            document to populate it.
+          </p>
+        </div>
+
+        <div v-else class="faq-grid-list">
+          <FaqEditCard
+            v-for="item in pagedManage"
+            :key="(item.faq.point_ids && item.faq.point_ids[0]) || 'new-' + item.index"
+            :faq="item.faq"
+            @delete="store.deleteExistingFaq(item.index)"
+          />
+        </div>
+
+        <div v-if="manageTotalPages > 1" class="pager">
+          <button class="btn-secondary pager-btn" :disabled="managePage === 1" @click="managePage--">‹ Prev</button>
+          <span class="pager-info">Page {{ managePage }} / {{ manageTotalPages }} · {{ store.existingFaqs.length }} FAQs</span>
+          <button class="btn-secondary pager-btn" :disabled="managePage === manageTotalPages" @click="managePage++">Next ›</button>
+        </div>
+      </template>
+    </div>
+
     <!-- Inactive / Idle state -->
-    <div v-if="store.statusStep < 3" class="empty-review-state">
+    <div v-else-if="store.statusStep < 3" class="empty-review-state">
       <div class="empty-review-icon">📑</div>
       <h2>FAQ Generation Grid</h2>
       <p class="max-w-400 text-sm">
@@ -59,23 +117,61 @@
       </div>
 
       <!-- FAQ Grid list -->
-      <div class="faq-grid-scroll">
+      <div class="faq-grid-list">
         <FaqEditCard
-          v-for="(faq, index) in store.extractedFaqs"
-          :key="index"
-          :faq="faq"
-          @delete="deleteFaq(index)"
+          v-for="item in pagedReview"
+          :key="item.index"
+          :faq="item.faq"
+          @delete="deleteFaq(item.index)"
         />
+      </div>
+
+      <div v-if="reviewTotalPages > 1" class="pager">
+        <button class="btn-secondary pager-btn" :disabled="reviewPage === 1" @click="reviewPage--">‹ Prev</button>
+        <span class="pager-info">Page {{ reviewPage }} / {{ reviewTotalPages }} · {{ store.extractedFaqs.length }} FAQs</span>
+        <button class="btn-secondary pager-btn" :disabled="reviewPage === reviewTotalPages" @click="reviewPage++">Next ›</button>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
+import { ref, computed, watch } from "vue";
 import { useSarStore } from "../../stores/sarStore";
 import FaqEditCard from "./FaqEditCard.vue";
 
 const store = useSarStore();
+const PAGE_SIZE = 5;
+
+// --- Review (extraction) pagination ---
+const reviewPage = ref(1);
+const reviewTotalPages = computed(() =>
+  Math.max(1, Math.ceil(store.extractedFaqs.length / PAGE_SIZE))
+);
+const pagedReview = computed(() => {
+  const start = (reviewPage.value - 1) * PAGE_SIZE;
+  return store.extractedFaqs
+    .slice(start, start + PAGE_SIZE)
+    .map((faq, i) => ({ faq, index: start + i }));
+});
+
+// --- Manage (existing) pagination ---
+const managePage = ref(1);
+const manageTotalPages = computed(() =>
+  Math.max(1, Math.ceil(store.existingFaqs.length / PAGE_SIZE))
+);
+const pagedManage = computed(() => {
+  const start = (managePage.value - 1) * PAGE_SIZE;
+  return store.existingFaqs
+    .slice(start, start + PAGE_SIZE)
+    .map((faq, i) => ({ faq, index: start + i }));
+});
+
+// Keep the current page within bounds when the list shrinks (deletes).
+watch(reviewTotalPages, (n) => { if (reviewPage.value > n) reviewPage.value = n; });
+watch(manageTotalPages, (n) => { if (managePage.value > n) managePage.value = n; });
+// Reset to the first page when switching DB.
+watch(() => store.selectedCollection, () => { managePage.value = 1; });
 
 const addManualFaq = () => {
   store.extractedFaqs.unshift({
@@ -85,6 +181,12 @@ const addManualFaq = () => {
     filename: "Manual Entry",
     source_type: "Manual",
   });
+  reviewPage.value = 1; // new row is added to the top
+};
+
+const addManualExisting = () => {
+  store.addManualExistingFaq();
+  managePage.value = 1; // new row is added to the top
 };
 
 const deleteFaq = (index) => {
@@ -191,12 +293,36 @@ const submitIngestion = async () => {
   justify-content: center;
 }
 
-.faq-grid-scroll {
-  flex: 1;
-  overflow-y: auto;
+.faq-grid-list {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
-  padding-right: 0.5rem;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.pager-btn {
+  min-width: 90px;
+  justify-content: center;
+}
+
+.pager-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pager-info {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  min-width: 200px;
+  text-align: center;
 }
 </style>

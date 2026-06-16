@@ -8,20 +8,14 @@
         <div
           class="toggle-option"
           :class="{ active: store.targetMode === 'create' }"
-          @click="
-            store.targetMode = 'create';
-            store.error = null;
-          "
+          @click="store.targetMode = 'create'; store.error = null"
         >
           Create New DB
         </div>
         <div
           class="toggle-option"
           :class="{ active: store.targetMode === 'append' }"
-          @click="
-            store.targetMode = 'append';
-            store.error = null;
-          "
+          @click="store.targetMode = 'append'; store.error = null"
         >
           Append to Existing
         </div>
@@ -29,7 +23,7 @@
 
       <!-- Database Selection Fields -->
       <div v-if="store.targetMode === 'create'" class="form-group">
-        <label class="form-label">New Knowledge Base Name</label>
+        <label class="form-label">New Database Name</label>
         <input
           type="text"
           class="input-control"
@@ -40,7 +34,7 @@
       </div>
 
       <div v-else class="form-group">
-        <label class="form-label">Select Knowledge Base</label>
+        <label class="form-label">Select Database</label>
         <select
           class="input-control"
           v-model="store.selectedCollection"
@@ -51,10 +45,7 @@
             {{ col }}
           </option>
         </select>
-        <p
-          v-if="store.collections.length === 0"
-          class="text-sm text-muted mt-2"
-        >
+        <p v-if="store.collections.length === 0" class="text-sm text-muted mt-2">
           No databases found. Create one first!
         </p>
         <button
@@ -126,10 +117,7 @@
       </div>
 
       <!-- Pending Files Badge -->
-      <div
-        v-if="store.statusStep === 0 && store.pendingFiles.length > 0"
-        class="mt-4"
-      >
+      <div v-if="store.statusStep === 0 && store.pendingFiles.length > 0" class="mt-4">
         <h4 class="mb-2 text-sm font-semibold">Staged Files:</h4>
         <div
           v-for="(file, index) in store.pendingFiles"
@@ -137,55 +125,31 @@
           class="file-info-badge mb-2"
         >
           <span class="file-name" :title="file.name">{{ file.name }}</span>
-          <button
-            class="btn-danger-text px-1"
-            @click="removePendingFile(index)"
-          >
+          <button class="btn-danger-text px-1" @click="removePendingFile(index)">
             Remove
           </button>
         </div>
-        <button
-          class="btn-primary w-full mt-2"
-          @click="store.processStagedFiles"
-        >
+        <button class="btn-primary w-full mt-2" @click="store.processStagedFiles">
           Process {{ store.pendingFiles.length }} Document(s)
         </button>
       </div>
 
       <!-- Processing Status -->
-      <div
-        v-if="store.statusStep > 0 && store.statusStep < 3"
-        class="file-info-badge mt-4"
-      >
+      <div v-if="store.statusStep > 0 && store.statusStep < 3" class="file-info-badge mt-4">
         <span v-if="store.statusStep === 1">
           Processing: {{ store.processedFiles + 1 }} / {{ store.totalFiles }}
         </span>
-        <span class="file-name" :title="store.currentFileName">{{
-          store.currentFileName
-        }}</span>
+        <span class="file-name" :title="store.currentFileName">{{ store.currentFileName }}</span>
         <span class="spinner w-4 h-4"></span>
       </div>
 
       <!-- Processing Cost (Shown when done) -->
-      <div
-        v-if="store.statusStep >= 3"
-        class="file-info-badge cost-summary mt-4"
-      >
+      <div v-if="store.statusStep >= 3" class="file-info-badge cost-summary mt-4">
         <span><strong>Total Files:</strong> {{ store.totalFiles }}</span>
-        <span
-          ><strong>Extraction Cost:</strong> ${{
-            store.totalExtractionCost.toFixed(4)
-          }}</span
-        >
-        <span v-if="store.statusStep >= 5"
-          ><strong>Expansion Cost:</strong> ${{
-            store.totalExpansionCost.toFixed(4)
-          }}</span
-        >
+        <span><strong>Extraction Cost:</strong> ${{ store.totalExtractionCost.toFixed(4) }}</span>
+        <span v-if="store.statusStep >= 5"><strong>Expansion Cost:</strong> ${{ store.totalExpansionCost.toFixed(4) }}</span>
         <span v-if="store.statusStep >= 5" class="total-cost">
-          <strong>Total Cost:</strong> ${{
-            (store.totalExtractionCost + store.totalExpansionCost).toFixed(4)
-          }}
+          <strong>Total Cost:</strong> ${{ (store.totalExtractionCost + store.totalExpansionCost).toFixed(4) }}
         </span>
       </div>
     </div>
@@ -251,57 +215,25 @@ const removePendingFile = (index) => {
 };
 
 const downloadDbCsv = (collection) => {
-  const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-  window.open(
-    `${baseUrl}/api/v1/collections/export/${collection}`,
-    "_blank",
-  );
+  window.open(`/api/v1/collections/export/${collection}`, "_blank");
 };
 </script>
 
 <style scoped>
-.mb-5 {
-  margin-bottom: 1.25rem;
-}
-.mb-2 {
-  margin-bottom: 0.5rem;
-}
-.mt-2 {
-  margin-top: 0.5rem;
-}
-.mt-3 {
-  margin-top: 0.75rem;
-}
-.mt-4 {
-  margin-top: 1rem;
-}
-.p-2 {
-  padding: 0.4rem;
-}
-.px-1 {
-  padding: 0 0.25rem;
-}
-.w-full {
-  width: 100%;
-}
-.w-4 {
-  width: 16px;
-}
-.h-4 {
-  height: 16px;
-}
-.text-sm {
-  font-size: 0.75rem;
-}
-.text-muted {
-  color: var(--text-muted);
-}
-.font-semibold {
-  font-weight: 600;
-}
-.hidden-input {
-  display: none;
-}
+.mb-5 { margin-bottom: 1.25rem; }
+.mb-2 { margin-bottom: 0.5rem; }
+.mt-2 { margin-top: 0.5rem; }
+.mt-3 { margin-top: 0.75rem; }
+.mt-4 { margin-top: 1rem; }
+.p-2 { padding: 0.4rem; }
+.px-1 { padding: 0 0.25rem; }
+.w-full { width: 100%; }
+.w-4 { width: 16px; }
+.h-4 { height: 16px; }
+.text-sm { font-size: 0.75rem; }
+.text-muted { color: var(--text-muted); }
+.font-semibold { font-weight: 600; }
+.hidden-input { display: none; }
 
 .cost-summary {
   display: flex;
