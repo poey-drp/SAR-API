@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 
-const API_BASE_URL = 'http://localhost:8000'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 export const useSarStore = defineStore('sar', {
   state: () => ({
@@ -241,7 +241,7 @@ export const useSarStore = defineStore('sar', {
       this.newDbName = ''
     },
     
-    async queryCollection(collectionName, query, chatHistory = []) {
+    async queryCollection(collectionName, query, chatHistory = [], allowOwnKnowledge = false) {
       this.error = null
       try {
         const response = await fetch(`${API_BASE_URL}/api/v1/query/${collectionName}`, {
@@ -249,7 +249,8 @@ export const useSarStore = defineStore('sar', {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             query,
-            chat_history: chatHistory
+            chat_history: chatHistory,
+            allow_own_knowledge: allowOwnKnowledge
           })
         })
         

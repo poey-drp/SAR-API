@@ -46,7 +46,7 @@
     </main>
 
     <footer style="margin-top: 3rem; border-top: 1px solid var(--border-color); padding: 1.5rem 0; text-align: center; font-size: 0.8rem; color: var(--text-muted);">
-      SAR Engine RAG System v3.0 • Powered by Qdrant (Dense + Sparse Hybrid) & gpt-4o-mini
+      SAR Engine System v3.0 • Powered by Qdrant (Dense + Sparse Hybrid) & gpt-4o-mini
     </footer>
   </div>
 </template>
