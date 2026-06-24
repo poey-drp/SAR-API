@@ -8,11 +8,14 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode
 from app.config import QDRANT_URL, OPENAI_API_KEY
 
-# Path can be overridden so the registry lives on a persistent volume (survives container recreate/reboot).
-REGISTRY_PATH = os.getenv(
+# Registry path is configurable so it can be mounted on a persistent volume in
+# Docker (otherwise it is wiped every time the backend container is recreated).
+REGISTRY_PATH = os.environ.get(
     "REGISTRY_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "collections_registry.json"),
 )
+# Ensure the parent directory exists (e.g. a freshly mounted /app/data volume).
+os.makedirs(os.path.dirname(REGISTRY_PATH), exist_ok=True)
 
 # Initialize models
 embeddings = OpenAIEmbeddings(model="text-embedding-3-large", openai_api_key=OPENAI_API_KEY)
@@ -98,6 +101,24 @@ def create_collection(collection_name: str) -> bool:
         return True
     except Exception as e:
         print(f"[Vector Store] Error creating collection: {e}")
+        raise e
+
+def delete_collection(collection_name: str) -> bool:
+    """Deletes a collection from Qdrant and removes it from the local registry."""
+    collection_name = collection_name.strip().lower()
+    try:
+        if client.collection_exists(collection_name):
+            client.delete_collection(collection_name=collection_name)
+            print(f"[Vector Store] Collection '{collection_name}' deleted from Qdrant.")
+
+        registry = load_registry()
+        if collection_name in registry:
+            registry = [c for c in registry if c != collection_name]
+            save_registry(registry)
+
+        return True
+    except Exception as e:
+        print(f"[Vector Store] Error deleting collection: {e}")
         raise e
 
 def get_vector_store(collection_name: str) -> QdrantVectorStore:

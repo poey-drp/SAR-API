@@ -34,6 +34,11 @@ backend/app/collections_registry.json
 # Auto-generated FAQ exports & runtime app data
 backend/exports/
 backend/appdata/
+backend/data/
+
+# Tooling cache & local data files
+.serena/
+merged_faq_for_vecdb.pdf
 
 # Logs
 logs/

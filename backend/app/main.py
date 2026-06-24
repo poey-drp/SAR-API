@@ -3,6 +3,7 @@
 import io
 import os
 import csv
+import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -14,15 +15,22 @@ import docx
 import pypdf
 
 from app.config import ALLOW_OWN_KNOWLEDGE, PORT
-from app.vector_store import get_collections, create_collection, get_vector_store
-from app.faq_generator import extract_faqs_from_text, expand_faq_questions, clean_rule_faqs
+from app.vector_store import get_collections, create_collection, get_vector_store, delete_collection
+from app.faq_generator import (
+    extract_faqs_from_text,
+    extract_faqs_from_text_stream,
+    expand_faq_questions,
+    expand_faq_questions_stream,
+    clean_rule_faqs,
+    clean_rule_faqs_stream,
+)
 from app.retrieval import retrieve_and_rerank
 from app.agents import rewrite_query, synthesize_answer
 from app.rule_faq_generator import extract_faqs_rules
 from app.language_utils import detect_language, get_db_language
 from fastapi.responses import StreamingResponse
 from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 from app.config import QDRANT_URL
 
 app = FastAPI(
@@ -61,20 +69,22 @@ class QueryRequest(BaseModel):
     chat_history: List[Dict[str, str]] = []
     allow_own_knowledge: Optional[bool] = None
 
-class DeleteFaqRequest(BaseModel):
-    point_ids: List[str]
-
-class ManageFaqItem(BaseModel):
-    point_ids: List[str] = []  # existing variation point ids to replace (empty = brand new FAQ)
+class AddFaqRequest(BaseModel):
     category: str = ""
     question: str
     answer: str
-    filename: Optional[str] = ""
-    source_type: Optional[str] = "Manual"
-
-class SaveFaqsRequest(BaseModel):
-    upserts: List[ManageFaqItem] = []
     language: str = "Thai"
+
+class EditFaqRequest(BaseModel):
+    # The original_question identifying the FAQ group to replace.
+    original_question: str
+    category: str = ""
+    question: str
+    answer: str
+    language: str = "Thai"
+
+class DeleteFaqRequest(BaseModel):
+    original_question: str
 
 @app.get("/api/v1/collections")
 async def api_get_collections():
@@ -120,116 +130,206 @@ async def api_create_collection(req: CreateCollectionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def _extract_text_from_bytes(file_bytes: bytes, ext: str) -> str:
+    """Extracts clean plain text from an uploaded document's bytes."""
+    if ext == "docx":
+        doc = docx.Document(io.BytesIO(file_bytes))
+        # Extract text paragraph by paragraph
+        return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+    elif ext == "pdf":
+        reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+        text_pages = []
+        for i, page in enumerate(reader.pages):
+            t = page.extract_text()
+            if t:
+                text_pages.append(f"--- Page {i+1} ---\n{t}")
+        return "\n".join(text_pages)
+    elif ext == "txt":
+        return file_bytes.decode("utf-8", errors="ignore")
+    return ""
+
+
 @app.post("/api/v1/extract-faq")
 async def api_extract_faq(
     file: UploadFile = File(...),
     language: str = Form("Thai"),
     num_questions: int = Form(10)
 ):
-    """Extracts clean text from a document and generates FAQ pairs."""
+    """
+    Extracts clean text from a document and generates FAQ pairs, streaming live
+    progress back to the client as newline-delimited JSON (NDJSON).
+
+    Each line is one JSON object. Event types:
+        {"type": "progress", "stage": "extracting"|"cleaning", "current": i, "total": N}
+        {"type": "status", "stage": "...", ...}
+        {"type": "result", "filename": "...", "faqs": [...], "extraction_cost": float}
+        {"type": "error", "detail": "..."}
+    """
     filename = file.filename
     ext = filename.split(".")[-1].lower() if "." in filename else ""
-    
+
     if ext not in ["docx", "pdf", "txt"]:
         raise HTTPException(status_code=400, detail=f"Unsupported file format: .{ext}. Supported formats are .docx, .pdf, .txt")
-        
-    try:
-        file_bytes = await file.read()
-        text = ""
-        
-        # 1. Clean Text Extraction
-        if ext == "docx":
-            doc = docx.Document(io.BytesIO(file_bytes))
-            # Extract text paragraph by paragraph
-            text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-        elif ext == "pdf":
-            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            text_pages = []
-            for i, page in enumerate(reader.pages):
-                t = page.extract_text()
-                if t:
-                    text_pages.append(f"--- Page {i+1} ---\n{t}")
-            text = "\n".join(text_pages)
-        elif ext == "txt":
-            text = file_bytes.decode("utf-8", errors="ignore")
-            
-        if not text.strip():
-            raise HTTPException(status_code=400, detail="No readable text found in document.")
-            
-        # 2. FAQ Extraction using modular generator
-        extracted_faqs_llm, extraction_cost = extract_faqs_from_text(text, filename, language, num_questions)
-        extracted_faqs_rules = extract_faqs_rules(text, filename)
-        
-        # 3. Clean rule-based FAQs
-        cleaned_rules, cleaning_cost = clean_rule_faqs(extracted_faqs_rules, language)
-        total_extraction_cost = extraction_cost + cleaning_cost
-        
-        extracted_faqs = extracted_faqs_llm + cleaned_rules
-        
-        return {
-            "filename": filename,
-            "faqs": extracted_faqs,
-            "extraction_cost": total_extraction_cost
-        }
-    except Exception as e:
-        print(f"[main] Error during text extraction/FAQ generation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+    # Read the upload before streaming starts (UploadFile is tied to the request).
+    file_bytes = await file.read()
+
+    def generate():
+        def line(event: dict) -> str:
+            return json.dumps(event, ensure_ascii=False) + "\n"
+
+        try:
+            # 1. Clean Text Extraction
+            text = _extract_text_from_bytes(file_bytes, ext)
+            if not text.strip():
+                yield line({"type": "error", "detail": "No readable text found in document."})
+                return
+            yield line({"type": "status", "stage": "extracted_text", "chars": len(text)})
+
+            # 2. FAQ Extraction using modular generator (streamed chunk by chunk)
+            extracted_faqs_llm, extraction_cost = [], 0.0
+            for ev in extract_faqs_from_text_stream(text, filename, language, num_questions):
+                if ev["type"] == "extract_done":
+                    extracted_faqs_llm = ev["faqs"]
+                    extraction_cost = ev["cost"]
+                else:
+                    yield line(ev)
+
+            # 3. Rule-based extraction + cleaning (streamed batch by batch)
+            yield line({"type": "status", "stage": "rule_extraction"})
+            extracted_faqs_rules = extract_faqs_rules(text, filename)
+
+            cleaned_rules, cleaning_cost = [], 0.0
+            for ev in clean_rule_faqs_stream(extracted_faqs_rules, language):
+                if ev["type"] == "clean_done":
+                    cleaned_rules = ev["faqs"]
+                    cleaning_cost = ev["cost"]
+                else:
+                    yield line(ev)
+
+            extracted_faqs = extracted_faqs_llm + cleaned_rules
+            yield line({
+                "type": "result",
+                "filename": filename,
+                "faqs": extracted_faqs,
+                "extraction_cost": extraction_cost + cleaning_cost
+            })
+        except Exception as e:
+            print(f"[main] Error during text extraction/FAQ generation: {e}")
+            yield line({"type": "error", "detail": str(e)})
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx proxy buffering so events flush live
+        },
+    )
 
 @app.post("/api/v1/collections/ingest")
 async def api_ingest_faqs(req: IngestRequest):
-    """Embeds and saves the FAQ pairs to the chosen Qdrant collection."""
+    """
+    Embeds and saves the FAQ pairs to the chosen Qdrant collection, streaming live
+    progress back to the client as newline-delimited JSON (NDJSON).
+
+    Each line is one JSON object. Event types:
+        {"type": "progress", "stage": "expanding"|"embedding", "current": i, "total": N}
+        {"type": "status", "stage": "..."}
+        {"type": "result", "status": "success", "count": int, "expansion_cost": float, "csv_path": "..."}
+        {"type": "error", "detail": "..."}
+    """
     if not req.faqs:
         raise HTTPException(status_code=400, detail="FAQ list is empty")
-        
-    try:
-        # 1. Expand FAQs
-        faqs_to_expand = []
-        for faq in req.faqs:
-            d = faq.model_dump() if hasattr(faq, 'model_dump') else faq.dict()
-            d['original_question'] = faq.question
-            faqs_to_expand.append(d)
-            
-        expanded_faqs, expansion_cost = expand_faq_questions(faqs_to_expand, language=req.language)
 
-        # 2. Create documents
-        docs = []
-        for faq in expanded_faqs:
-            page_content = f"Question: {faq['question']}\nAnswer: {faq['answer']}"
-            metadata = {
-                "category": faq.get('category', ''),
-                "original_question": faq.get('original_question', faq.get('question', '')),
-                "answer": faq.get('answer', ''),
-                "source_file": faq.get('filename') or req.filename,
-                "source_type": faq.get('source_type', 'LLM')
-            }
-            docs.append(Document(page_content=page_content, metadata=metadata))
-            
-        # Add to vector store in hybrid mode
-        store = get_vector_store(req.collection_name)
-        store.add_documents(docs)
-        
-        # 3. Export to CSV
-        os.makedirs("exports", exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        export_filename = f"exports/{req.collection_name}_{timestamp}.csv"
-        
-        with open(export_filename, mode='w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Category", "Filename", "Original Question", "Question Variation", "Answer", "Source Type"])
+    # Number of documents pushed to Qdrant per add_documents call so embedding
+    # progress can be streamed batch by batch instead of one opaque bulk call.
+    EMBED_BATCH_SIZE = 50
+
+    # Snapshot the request data before streaming starts.
+    faqs_to_expand = []
+    for faq in req.faqs:
+        d = faq.model_dump() if hasattr(faq, 'model_dump') else faq.dict()
+        d['original_question'] = faq.question
+        faqs_to_expand.append(d)
+
+    def generate():
+        def line(event: dict) -> str:
+            return json.dumps(event, ensure_ascii=False) + "\n"
+
+        try:
+            # 1. Expand FAQs (streamed question by question)
+            expanded_faqs, expansion_cost = [], 0.0
+            for ev in expand_faq_questions_stream(faqs_to_expand, language=req.language):
+                if ev["type"] == "expand_done":
+                    expanded_faqs = ev["faqs"]
+                    expansion_cost = ev["cost"]
+                else:
+                    yield line(ev)
+
+            # 2. Create documents
+            docs = []
             for faq in expanded_faqs:
-                writer.writerow([
-                    faq.get('category', ''),
-                    faq.get('filename', req.filename),
-                    faq.get('original_question', ''),
-                    faq.get('question', ''),
-                    faq.get('answer', ''),
-                    faq.get('source_type', 'LLM')
-                ])
-        
-        return {"status": "success", "count": len(docs), "expansion_cost": expansion_cost, "csv_path": export_filename}
-    except Exception as e:
-        print(f"[main] Error during ingestion: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+                page_content = f"Question: {faq['question']}\nAnswer: {faq['answer']}"
+                metadata = {
+                    "category": faq.get('category', ''),
+                    "original_question": faq.get('original_question', faq.get('question', '')),
+                    "answer": faq.get('answer', ''),
+                    "source_file": faq.get('filename') or req.filename,
+                    "source_type": faq.get('source_type', 'LLM')
+                }
+                docs.append(Document(page_content=page_content, metadata=metadata))
+
+            # 3. Add to vector store in hybrid mode (streamed batch by batch)
+            store = get_vector_store(req.collection_name)
+            total = len(docs)
+            for start in range(0, total, EMBED_BATCH_SIZE):
+                batch = docs[start:start + EMBED_BATCH_SIZE]
+                store.add_documents(batch)
+                yield line({
+                    "type": "progress",
+                    "stage": "embedding",
+                    "current": min(start + EMBED_BATCH_SIZE, total),
+                    "total": total,
+                })
+
+            # 4. Export to CSV
+            os.makedirs("exports", exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            export_filename = f"exports/{req.collection_name}_{timestamp}.csv"
+
+            with open(export_filename, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Category", "Filename", "Original Question", "Question Variation", "Answer", "Source Type"])
+                for faq in expanded_faqs:
+                    writer.writerow([
+                        faq.get('category', ''),
+                        faq.get('filename', req.filename),
+                        faq.get('original_question', ''),
+                        faq.get('question', ''),
+                        faq.get('answer', ''),
+                        faq.get('source_type', 'LLM')
+                    ])
+
+            yield line({
+                "type": "result",
+                "status": "success",
+                "count": len(docs),
+                "expansion_cost": expansion_cost,
+                "csv_path": export_filename,
+            })
+        except Exception as e:
+            print(f"[main] Error during ingestion: {e}")
+            yield line({"type": "error", "detail": str(e)})
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx proxy buffering so events flush live
+        },
+    )
 
 @app.post("/api/v1/query/{collection_name}")
 async def api_query_collection(collection_name: str, req: QueryRequest):
@@ -383,130 +483,102 @@ async def api_get_collection_faqs(collection_name: str, limit: int = 100):
         print(f"[main] Error getting FAQs for '{collection_name}': {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/v1/collections/{collection_name}/faqs/grouped")
-async def api_get_collection_faqs_grouped(collection_name: str):
-    """Returns existing FAQs grouped by their original question (one card per FAQ).
 
-    Each group carries the list of underlying Qdrant point ids (original + every
-    expanded question variation) so the UI can edit/delete the whole FAQ at once.
-    """
+def _ensure_collection(collection_name: str) -> str:
+    """Validates the collection is managed by this app; returns the normalized name."""
+    collection_name = collection_name.strip().lower()
+    if collection_name not in get_collections():
+        raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found or not initialized in this app")
+    return collection_name
+
+
+def _delete_faq_group(collection_name: str, original_question: str) -> None:
+    """Deletes every point (all paraphrase variations) whose metadata.original_question matches."""
+    client = QdrantClient(url=QDRANT_URL)
+    client.delete(
+        collection_name=collection_name,
+        points_selector=Filter(
+            must=[FieldCondition(key="metadata.original_question", match=MatchValue(value=original_question))]
+        ),
+    )
+
+
+def _add_faq_group(collection_name: str, category: str, question: str, answer: str, language: str) -> tuple[int, float]:
+    """Expands one FAQ into question variations, embeds them, and returns (count, expansion_cost)."""
+    faq = {
+        "category": category,
+        "question": question,
+        "answer": answer,
+        "original_question": question,
+        "source_type": "Manual",
+    }
+    expanded_faqs, expansion_cost = expand_faq_questions([faq], language=language)
+
+    docs = []
+    for f in expanded_faqs:
+        page_content = f"Question: {f['question']}\nAnswer: {f['answer']}"
+        metadata = {
+            "category": f.get("category", ""),
+            "original_question": f.get("original_question", question),
+            "answer": f.get("answer", ""),
+            "source_file": f.get("filename", "") or "manual",
+            "source_type": f.get("source_type", "Manual"),
+        }
+        docs.append(Document(page_content=page_content, metadata=metadata))
+
+    store = get_vector_store(collection_name)
+    store.add_documents(docs)
+    return len(docs), expansion_cost
+
+
+@app.post("/api/v1/collections/{collection_name}/delete")
+async def api_delete_collection(collection_name: str):
+    """Deletes an entire Knowledge Base (Qdrant collection + registry entry)."""
+    collection_name = _ensure_collection(collection_name)
     try:
-        client = QdrantClient(url=QDRANT_URL)
-        groups: Dict[str, Dict[str, Any]] = {}
-        order: List[str] = []
-
-        offset = None
-        while True:
-            records, next_page = client.scroll(
-                collection_name=collection_name,
-                limit=100,
-                offset=offset,
-                with_payload=True,
-            )
-            for record in records:
-                payload = record.payload or {}
-                metadata = payload.get("metadata", {})
-                orig_q = metadata.get("original_question", "")
-                # Fall back to the variation question if no original is stored.
-                if not orig_q:
-                    page_content = payload.get("page_content", "")
-                    for line in page_content.split("\n"):
-                        if line.startswith("Question: "):
-                            orig_q = line[len("Question: "):]
-                            break
-                key = orig_q or str(record.id)
-                if key not in groups:
-                    groups[key] = {
-                        "category": metadata.get("category", ""),
-                        "question": orig_q,
-                        "answer": metadata.get("answer", ""),
-                        "filename": metadata.get("source_file", ""),
-                        "source_type": metadata.get("source_type", "LLM"),
-                        "point_ids": [],
-                    }
-                    order.append(key)
-                groups[key]["point_ids"].append(str(record.id))
-
-            if next_page is None:
-                break
-            offset = next_page
-
-        return {"faqs": [groups[k] for k in order]}
+        delete_collection(collection_name)
+        return {"status": "success", "deleted": collection_name}
     except Exception as e:
-        print(f"[main] Error getting grouped FAQs for '{collection_name}': {e}")
+        print(f"[main] Error deleting collection '{collection_name}': {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/collections/{collection_name}/faqs/add")
+async def api_add_faq(collection_name: str, req: AddFaqRequest):
+    """Adds a single new FAQ (expanded into variations and embedded) to a collection."""
+    collection_name = _ensure_collection(collection_name)
+    if not req.question.strip() or not req.answer.strip():
+        raise HTTPException(status_code=400, detail="Question and answer are required")
+    try:
+        count, cost = _add_faq_group(collection_name, req.category, req.question, req.answer, req.language)
+        return {"status": "success", "count": count, "expansion_cost": cost}
+    except Exception as e:
+        print(f"[main] Error adding FAQ to '{collection_name}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/collections/{collection_name}/faqs/edit")
+async def api_edit_faq(collection_name: str, req: EditFaqRequest):
+    """Replaces an existing FAQ group: deletes the old variations, then re-expands and embeds the new content."""
+    collection_name = _ensure_collection(collection_name)
+    if not req.question.strip() or not req.answer.strip():
+        raise HTTPException(status_code=400, detail="Question and answer are required")
+    try:
+        _delete_faq_group(collection_name, req.original_question)
+        count, cost = _add_faq_group(collection_name, req.category, req.question, req.answer, req.language)
+        return {"status": "success", "count": count, "expansion_cost": cost}
+    except Exception as e:
+        print(f"[main] Error editing FAQ in '{collection_name}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/v1/collections/{collection_name}/faqs/delete")
 async def api_delete_faq(collection_name: str, req: DeleteFaqRequest):
-    """Deletes the given Qdrant points (all variations of one FAQ)."""
-    if not req.point_ids:
-        raise HTTPException(status_code=400, detail="No point ids provided")
+    """Deletes an FAQ group (all paraphrase variations sharing the original question)."""
+    collection_name = _ensure_collection(collection_name)
     try:
-        client = QdrantClient(url=QDRANT_URL)
-        client.delete(
-            collection_name=collection_name,
-            points_selector=qmodels.PointIdsList(points=req.point_ids),
-        )
-        return {"status": "success", "deleted": len(req.point_ids)}
+        _delete_faq_group(collection_name, req.original_question)
+        return {"status": "success"}
     except Exception as e:
-        print(f"[main] Error deleting FAQ points in '{collection_name}': {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/collections/{collection_name}/faqs/save")
-async def api_save_faqs(collection_name: str, req: SaveFaqsRequest):
-    """Adds new FAQs and/or replaces edited ones in an existing collection.
-
-    For edited items the caller passes the old variation point ids, which are
-    removed before the edited FAQ is re-expanded and re-embedded.
-    """
-    if not req.upserts:
-        raise HTTPException(status_code=400, detail="Nothing to save")
-    try:
-        client = QdrantClient(url=QDRANT_URL)
-
-        # 1. Remove the old points for any edited FAQs.
-        ids_to_replace = [pid for item in req.upserts for pid in item.point_ids]
-        if ids_to_replace:
-            client.delete(
-                collection_name=collection_name,
-                points_selector=qmodels.PointIdsList(points=ids_to_replace),
-            )
-
-        # 2. Expand (paraphrase x5) the new/edited FAQs.
-        faqs_to_expand = []
-        for item in req.upserts:
-            faqs_to_expand.append({
-                "category": item.category,
-                "question": item.question,
-                "answer": item.answer,
-                "filename": item.filename or "Manual Entry",
-                "source_type": item.source_type or "Manual",
-                "original_question": item.question,
-            })
-        expanded_faqs, expansion_cost = expand_faq_questions(faqs_to_expand, language=req.language)
-
-        # 3. Embed + store.
-        docs = []
-        for faq in expanded_faqs:
-            page_content = f"Question: {faq['question']}\nAnswer: {faq['answer']}"
-            metadata = {
-                "category": faq.get("category", ""),
-                "original_question": faq.get("original_question", faq.get("question", "")),
-                "answer": faq.get("answer", ""),
-                "source_file": faq.get("filename") or "Manual Entry",
-                "source_type": faq.get("source_type", "Manual"),
-            }
-            docs.append(Document(page_content=page_content, metadata=metadata))
-
-        store = get_vector_store(collection_name)
-        store.add_documents(docs)
-
-        return {
-            "status": "success",
-            "added": len(docs),
-            "replaced": len(ids_to_replace),
-            "expansion_cost": expansion_cost,
-        }
-    except Exception as e:
-        print(f"[main] Error saving FAQs in '{collection_name}': {e}")
+        print(f"[main] Error deleting FAQ from '{collection_name}': {e}")
         raise HTTPException(status_code=500, detail=str(e))

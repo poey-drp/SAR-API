@@ -8,14 +8,20 @@
         <div
           class="toggle-option"
           :class="{ active: store.targetMode === 'create' }"
-          @click="store.targetMode = 'create'; store.error = null"
+          @click="
+            store.targetMode = 'create';
+            store.error = null;
+          "
         >
           Create New DB
         </div>
         <div
           class="toggle-option"
           :class="{ active: store.targetMode === 'append' }"
-          @click="store.targetMode = 'append'; store.error = null"
+          @click="
+            store.targetMode = 'append';
+            store.error = null;
+          "
         >
           Append to Existing
         </div>
@@ -23,7 +29,7 @@
 
       <!-- Database Selection Fields -->
       <div v-if="store.targetMode === 'create'" class="form-group">
-        <label class="form-label">New Database Name</label>
+        <label class="form-label">New Knowledge Base Name</label>
         <input
           type="text"
           class="input-control"
@@ -34,7 +40,7 @@
       </div>
 
       <div v-else class="form-group">
-        <label class="form-label">Select Database</label>
+        <label class="form-label">Select Knowledge Base</label>
         <select
           class="input-control"
           v-model="store.selectedCollection"
@@ -45,7 +51,10 @@
             {{ col }}
           </option>
         </select>
-        <p v-if="store.collections.length === 0" class="text-sm text-muted mt-2">
+        <p
+          v-if="store.collections.length === 0"
+          class="text-sm text-muted mt-2"
+        >
           No databases found. Create one first!
         </p>
         <button
@@ -117,7 +126,10 @@
       </div>
 
       <!-- Pending Files Badge -->
-      <div v-if="store.statusStep === 0 && store.pendingFiles.length > 0" class="mt-4">
+      <div
+        v-if="store.statusStep === 0 && store.pendingFiles.length > 0"
+        class="mt-4"
+      >
         <h4 class="mb-2 text-sm font-semibold">Staged Files:</h4>
         <div
           v-for="(file, index) in store.pendingFiles"
@@ -125,31 +137,74 @@
           class="file-info-badge mb-2"
         >
           <span class="file-name" :title="file.name">{{ file.name }}</span>
-          <button class="btn-danger-text px-1" @click="removePendingFile(index)">
+          <button
+            class="btn-danger-text px-1"
+            @click="removePendingFile(index)"
+          >
             Remove
           </button>
         </div>
-        <button class="btn-primary w-full mt-2" @click="store.processStagedFiles">
+        <button
+          class="btn-primary w-full mt-2"
+          @click="store.processStagedFiles"
+        >
           Process {{ store.pendingFiles.length }} Document(s)
         </button>
       </div>
 
       <!-- Processing Status -->
-      <div v-if="store.statusStep > 0 && store.statusStep < 3" class="file-info-badge mt-4">
-        <span v-if="store.statusStep === 1">
-          Processing: {{ store.processedFiles + 1 }} / {{ store.totalFiles }}
-        </span>
-        <span class="file-name" :title="store.currentFileName">{{ store.currentFileName }}</span>
-        <span class="spinner w-4 h-4"></span>
+      <div
+        v-if="store.statusStep > 0 && store.statusStep < 3"
+        class="file-info-badge processing-status mt-4"
+      >
+        <div class="processing-head">
+          <span v-if="store.statusStep === 1">
+            Processing: {{ store.processedFiles + 1 }} / {{ store.totalFiles }}
+          </span>
+          <span class="file-name" :title="store.currentFileName">{{
+            store.currentFileName
+          }}</span>
+          <span class="spinner w-4 h-4"></span>
+        </div>
+
+        <!-- Live chunk-level progress -->
+        <div
+          v-if="store.statusStep === 1 && store.totalChunks > 0"
+          class="chunk-progress"
+        >
+          <div class="chunk-bar-track">
+            <div
+              class="chunk-bar-fill"
+              :style="{ width: chunkPercent + '%' }"
+            ></div>
+          </div>
+          <div class="chunk-label">
+            {{ chunkStageLabel }} {{ store.currentChunk }}/{{ store.totalChunks }}
+            ({{ chunkPercent }}%)
+          </div>
+        </div>
       </div>
 
       <!-- Processing Cost (Shown when done) -->
-      <div v-if="store.statusStep >= 3" class="file-info-badge cost-summary mt-4">
+      <div
+        v-if="store.statusStep >= 3"
+        class="file-info-badge cost-summary mt-4"
+      >
         <span><strong>Total Files:</strong> {{ store.totalFiles }}</span>
-        <span><strong>Extraction Cost:</strong> ${{ store.totalExtractionCost.toFixed(4) }}</span>
-        <span v-if="store.statusStep >= 5"><strong>Expansion Cost:</strong> ${{ store.totalExpansionCost.toFixed(4) }}</span>
+        <span
+          ><strong>Extraction Cost:</strong> ${{
+            store.totalExtractionCost.toFixed(4)
+          }}</span
+        >
+        <span v-if="store.statusStep >= 5"
+          ><strong>Expansion Cost:</strong> ${{
+            store.totalExpansionCost.toFixed(4)
+          }}</span
+        >
         <span v-if="store.statusStep >= 5" class="total-cost">
-          <strong>Total Cost:</strong> ${{ (store.totalExtractionCost + store.totalExpansionCost).toFixed(4) }}
+          <strong>Total Cost:</strong> ${{
+            (store.totalExtractionCost + store.totalExpansionCost).toFixed(4)
+          }}
         </span>
       </div>
     </div>
@@ -169,6 +224,16 @@ const isTargetValid = computed(() => {
     return store.newDbName.trim().length > 0;
   }
   return store.selectedCollection !== "";
+});
+
+const chunkPercent = computed(() => {
+  if (!store.totalChunks) return 0;
+  return Math.round((store.currentChunk / store.totalChunks) * 100);
+});
+
+const chunkStageLabel = computed(() => {
+  if (store.progressStage === "cleaning") return "Cleaning batch";
+  return "Processing chunk";
 });
 
 const onDragOver = () => {
@@ -215,25 +280,57 @@ const removePendingFile = (index) => {
 };
 
 const downloadDbCsv = (collection) => {
-  window.open(`/api/v1/collections/export/${collection}`, "_blank");
+  const baseUrl = import.meta.env.VITE_API_URL || window.location.origin
+  window.open(
+    `${baseUrl}/api/v1/collections/export/${collection}`,
+    "_blank",
+  );
 };
 </script>
 
 <style scoped>
-.mb-5 { margin-bottom: 1.25rem; }
-.mb-2 { margin-bottom: 0.5rem; }
-.mt-2 { margin-top: 0.5rem; }
-.mt-3 { margin-top: 0.75rem; }
-.mt-4 { margin-top: 1rem; }
-.p-2 { padding: 0.4rem; }
-.px-1 { padding: 0 0.25rem; }
-.w-full { width: 100%; }
-.w-4 { width: 16px; }
-.h-4 { height: 16px; }
-.text-sm { font-size: 0.75rem; }
-.text-muted { color: var(--text-muted); }
-.font-semibold { font-weight: 600; }
-.hidden-input { display: none; }
+.mb-5 {
+  margin-bottom: 1.25rem;
+}
+.mb-2 {
+  margin-bottom: 0.5rem;
+}
+.mt-2 {
+  margin-top: 0.5rem;
+}
+.mt-3 {
+  margin-top: 0.75rem;
+}
+.mt-4 {
+  margin-top: 1rem;
+}
+.p-2 {
+  padding: 0.4rem;
+}
+.px-1 {
+  padding: 0 0.25rem;
+}
+.w-full {
+  width: 100%;
+}
+.w-4 {
+  width: 16px;
+}
+.h-4 {
+  height: 16px;
+}
+.text-sm {
+  font-size: 0.75rem;
+}
+.text-muted {
+  color: var(--text-muted);
+}
+.font-semibold {
+  font-weight: 600;
+}
+.hidden-input {
+  display: none;
+}
 
 .cost-summary {
   display: flex;
@@ -252,5 +349,37 @@ const downloadDbCsv = (collection) => {
   cursor: not-allowed;
   border-color: var(--border-color);
   background: var(--bg-secondary);
+}
+
+/* Processing status: stack the header row above the chunk progress bar */
+.processing-status {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+.processing-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.chunk-bar-track {
+  width: 100%;
+  height: 6px;
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.chunk-bar-fill {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.chunk-label {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
 }
 </style>

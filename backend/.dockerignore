@@ -1,7 +1,7 @@
-venv/
 __pycache__/
 *.pyc
-qdrant_storage/
-exports/
-app/collections_registry.json
 .env
+.git/
+.gitignore
+exports/
+qdrant_storage/

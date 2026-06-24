@@ -1,65 +1,112 @@
 <template>
   <div class="right-column panel-card min-h-500">
-    <!-- Manage existing collection FAQs (add / edit / delete) -->
+    <!-- Append mode: preview the selected Knowledge Base -->
     <div
-      v-if="store.statusStep === 0 && store.managingExisting"
-      class="faq-review-container"
+      v-if="store.statusStep < 3 && showKbPreview"
+      class="kb-preview"
     >
-      <div v-if="store.existingLoading" class="empty-review-state">
-        <div class="spinner big-spinner mb-4"></div>
-        <h2>Loading FAQs from "{{ store.selectedCollection }}"...</h2>
+      <div class="kb-preview-header">
+        <div>
+          <div class="kb-preview-eyebrow">Knowledge Base</div>
+          <h2 class="kb-preview-name">{{ store.selectedCollection }}</h2>
+        </div>
+        <div class="kb-header-right">
+          <div class="kb-stats">
+            <div class="kb-stat">
+              <div class="kb-stat-value">{{ selectedKbStats?.points_count ?? "—" }}</div>
+              <div class="kb-stat-label">Vectors</div>
+            </div>
+            <div class="kb-stat">
+              <div class="kb-stat-value">{{ kbUniqueQuestionCount }}</div>
+              <div class="kb-stat-label">Questions (sample)</div>
+            </div>
+          </div>
+          <button
+            class="kb-delete-db-btn"
+            :disabled="kbSaving"
+            title="ลบ Knowledge Base นี้ทั้งหมด"
+            @click="deleteKnowledgeBase"
+          >
+            🗑️ ลบ KB
+          </button>
+        </div>
       </div>
-      <template v-else>
-        <div class="faq-review-header">
-          <div>
-            <h2>Manage FAQs — {{ store.selectedCollection }}</h2>
-            <p class="text-xs text-muted mt-1">
-              {{ store.existingFaqs.length }} FAQ(s) in this database. Add, edit,
-              or delete entries below.
-            </p>
+
+      <div class="kb-preview-toolbar">
+        <p class="kb-preview-hint">
+          เอกสารที่อัปโหลดจะถูกเพิ่มเข้าไปใน Knowledge Base นี้ ตัวอย่างข้อมูลที่มีอยู่:
+        </p>
+        <button class="kb-add-btn" :disabled="kbSaving" @click="openAddForm">
+          + เพิ่ม FAQ
+        </button>
+      </div>
+
+      <!-- Add / Edit form -->
+      <div v-if="kbForm" class="kb-form">
+        <div class="kb-form-title">
+          {{ kbForm.mode === "add" ? "เพิ่ม FAQ ใหม่" : "แก้ไข FAQ" }}
+        </div>
+        <label class="kb-form-label">หมวดหมู่ (Category)</label>
+        <input v-model="kbForm.category" class="kb-form-input" placeholder="เช่น เวลาทำการ" />
+        <label class="kb-form-label">คำถาม (Question)</label>
+        <textarea v-model="kbForm.question" class="kb-form-input" rows="2"></textarea>
+        <label class="kb-form-label">คำตอบ (Answer)</label>
+        <textarea v-model="kbForm.answer" class="kb-form-input" rows="3"></textarea>
+        <div class="kb-form-actions">
+          <button class="kb-btn-ghost" :disabled="kbSaving" @click="kbForm = null">
+            ยกเลิก
+          </button>
+          <button class="kb-btn-primary" :disabled="kbSaving || !kbFormValid" @click="saveKbForm">
+            <span v-if="kbSaving" class="spinner sm"></span>
+            {{ kbSaving ? "กำลังบันทึก..." : "บันทึก" }}
+          </button>
+        </div>
+        <p class="kb-form-note">
+          * ระบบจะสร้างคำถามที่หลากหลาย (x5) และฝัง embedding ใหม่อัตโนมัติ
+        </p>
+      </div>
+
+      <div v-if="kbError" class="kb-error">{{ kbError }}</div>
+
+      <div v-if="kbLoading" class="kb-preview-loading">
+        <div class="spinner"></div>
+        <span>กำลังโหลดข้อมูล...</span>
+      </div>
+
+      <div v-else-if="kbPreviewFaqs.length === 0" class="kb-preview-empty">
+        ยังไม่มีข้อมูลใน Knowledge Base นี้
+      </div>
+
+      <div v-else class="kb-faq-list">
+        <div
+          v-for="faq in kbPreviewFaqs"
+          :key="faq.id"
+          class="kb-faq-item"
+        >
+          <div class="kb-faq-main">
+            <div class="kb-faq-q">
+              <span v-if="faq.category" class="kb-faq-cat">{{ faq.category }}</span>
+              {{ faq.original_question || faq.question }}
+            </div>
+            <div class="kb-faq-a">{{ faq.answer }}</div>
           </div>
-          <div class="action-buttons">
-            <button class="btn-secondary action-add" @click="addManualExisting">
-              ➕ Add manually
+          <div class="kb-faq-actions">
+            <button class="kb-icon-btn" title="แก้ไข" :disabled="kbSaving" @click="openEditForm(faq)">
+              ✏️
             </button>
-            <button
-              class="btn-primary action-save"
-              :disabled="store.savingExisting"
-              @click="store.saveExistingChanges()"
-            >
-              <span v-if="store.savingExisting" class="spinner w-4 h-4"></span>
-              <span v-else>💾 Save Changes ({{ store.existingPendingCount() }})</span>
+            <button class="kb-icon-btn danger" title="ลบ" :disabled="kbSaving" @click="deleteKbFaq(faq)">
+              🗑️
             </button>
           </div>
         </div>
-
-        <div v-if="store.existingFaqs.length === 0" class="empty-review-state">
-          <div class="empty-review-icon">📭</div>
-          <p class="max-w-400 text-sm">
-            This database has no FAQ entries yet. Click "Add manually" or upload a
-            document to populate it.
-          </p>
-        </div>
-
-        <div v-else class="faq-grid-list">
-          <FaqEditCard
-            v-for="item in pagedManage"
-            :key="(item.faq.point_ids && item.faq.point_ids[0]) || 'new-' + item.index"
-            :faq="item.faq"
-            @delete="store.deleteExistingFaq(item.index)"
-          />
-        </div>
-
-        <div v-if="manageTotalPages > 1" class="pager">
-          <button class="btn-secondary pager-btn" :disabled="managePage === 1" @click="managePage--">‹ Prev</button>
-          <span class="pager-info">Page {{ managePage }} / {{ manageTotalPages }} · {{ store.existingFaqs.length }} FAQs</span>
-          <button class="btn-secondary pager-btn" :disabled="managePage === manageTotalPages" @click="managePage++">Next ›</button>
-        </div>
-      </template>
+      </div>
     </div>
 
     <!-- Inactive / Idle state -->
-    <div v-else-if="store.statusStep < 3" class="empty-review-state">
+    <div
+      v-else-if="store.statusStep < 3"
+      class="empty-review-state"
+    >
       <div class="empty-review-icon">📑</div>
       <h2>FAQ Generation Grid</h2>
       <p class="max-w-400 text-sm">
@@ -75,6 +122,18 @@
       <p>
         Generating x5 question variations and dense vector embeddings in Qdrant.
       </p>
+      <div v-if="store.totalChunks > 0" class="ingest-progress">
+        <div class="ingest-bar-track">
+          <div
+            class="ingest-bar-fill"
+            :style="{ width: ingestPercent + '%' }"
+          ></div>
+        </div>
+        <div class="ingest-label">
+          {{ ingestStageLabel }} {{ store.currentChunk }}/{{ store.totalChunks }}
+          ({{ ingestPercent }}%)
+        </div>
+      </div>
     </div>
 
     <!-- Success State -->
@@ -117,19 +176,34 @@
       </div>
 
       <!-- FAQ Grid list -->
-      <div class="faq-grid-list">
+      <div class="faq-grid-scroll">
         <FaqEditCard
-          v-for="item in pagedReview"
-          :key="item.index"
-          :faq="item.faq"
-          @delete="deleteFaq(item.index)"
+          v-for="(faq, index) in pagedFaqs"
+          :key="pageStartIndex + index"
+          :faq="faq"
+          @delete="deleteFaq(pageStartIndex + index)"
         />
       </div>
 
-      <div v-if="reviewTotalPages > 1" class="pager">
-        <button class="btn-secondary pager-btn" :disabled="reviewPage === 1" @click="reviewPage--">‹ Prev</button>
-        <span class="pager-info">Page {{ reviewPage }} / {{ reviewTotalPages }} · {{ store.extractedFaqs.length }} FAQs</span>
-        <button class="btn-secondary pager-btn" :disabled="reviewPage === reviewTotalPages" @click="reviewPage++">Next ›</button>
+      <!-- Pagination -->
+      <div v-if="totalPages > 1" class="faq-pagination">
+        <button
+          class="btn-secondary page-btn"
+          :disabled="currentPage === 1"
+          @click="currentPage--"
+        >
+          ‹ Prev
+        </button>
+        <span class="page-info">
+          Page {{ currentPage }} / {{ totalPages }}
+        </span>
+        <button
+          class="btn-secondary page-btn"
+          :disabled="currentPage === totalPages"
+          @click="currentPage++"
+        >
+          Next ›
+        </button>
       </div>
     </div>
   </div>
@@ -141,37 +215,185 @@ import { useSarStore } from "../../stores/sarStore";
 import FaqEditCard from "./FaqEditCard.vue";
 
 const store = useSarStore();
-const PAGE_SIZE = 5;
 
-// --- Review (extraction) pagination ---
-const reviewPage = ref(1);
-const reviewTotalPages = computed(() =>
+const PAGE_SIZE = 10;
+const currentPage = ref(1);
+
+// --- Append-mode Knowledge Base preview ---------------------------------
+const kbPreviewFaqs = ref([]);
+const kbLoading = ref(false);
+
+// Show the preview only while idle (before extraction), in append mode,
+// with a collection actually selected.
+const showKbPreview = computed(
+  () =>
+    store.statusStep < 3 &&
+    store.targetMode === "append" &&
+    !!store.selectedCollection
+);
+
+const selectedKbStats = computed(() =>
+  store.collectionStats.find((s) => s.name === store.selectedCollection)
+);
+
+// Count distinct original questions in the sample (variations collapse to one).
+const kbUniqueQuestionCount = computed(() => {
+  const seen = new Set(
+    kbPreviewFaqs.value.map((f) => f.original_question || f.question)
+  );
+  return seen.size;
+});
+
+// CRUD state for the append-mode KB preview.
+const kbForm = ref(null); // { mode: 'add'|'edit', original_question, category, question, answer }
+const kbSaving = ref(false);
+const kbError = ref(null);
+
+const kbFormValid = computed(
+  () =>
+    kbForm.value &&
+    kbForm.value.question.trim() &&
+    kbForm.value.answer.trim()
+);
+
+const openAddForm = () => {
+  kbError.value = null;
+  kbForm.value = { mode: "add", original_question: "", category: "", question: "", answer: "" };
+};
+
+const openEditForm = (faq) => {
+  kbError.value = null;
+  kbForm.value = {
+    mode: "edit",
+    original_question: faq.original_question || faq.question,
+    category: faq.category || "",
+    question: faq.original_question || faq.question,
+    answer: faq.answer || "",
+  };
+};
+
+const saveKbForm = async () => {
+  if (!kbFormValid.value) return;
+  kbSaving.value = true;
+  kbError.value = null;
+  const name = store.selectedCollection;
+  const payload = {
+    category: kbForm.value.category,
+    question: kbForm.value.question,
+    answer: kbForm.value.answer,
+  };
+  try {
+    if (kbForm.value.mode === "add") {
+      await store.addFaqToCollection(name, payload);
+    } else {
+      await store.editFaqInCollection(name, kbForm.value.original_question, payload);
+    }
+    kbForm.value = null;
+    await store.fetchCollectionStats();
+    await loadKbPreview(name);
+  } catch (err) {
+    kbError.value = err.message;
+  } finally {
+    kbSaving.value = false;
+  }
+};
+
+const deleteKnowledgeBase = async () => {
+  const name = store.selectedCollection;
+  if (!name) return;
+  if (
+    !window.confirm(
+      `ต้องการลบ Knowledge Base "${name}" ทั้งหมด?\n\nข้อมูล FAQ ทั้งหมดใน KB นี้จะถูกลบถาวรและกู้คืนไม่ได้`
+    )
+  )
+    return;
+  kbSaving.value = true;
+  kbError.value = null;
+  try {
+    await store.deleteCollection(name);
+    kbForm.value = null;
+    kbPreviewFaqs.value = [];
+    // selectedCollection is cleared by the store; preview hides automatically.
+  } catch (err) {
+    kbError.value = err.message;
+  } finally {
+    kbSaving.value = false;
+  }
+};
+
+const deleteKbFaq = async (faq) => {
+  const key = faq.original_question || faq.question;
+  if (!window.confirm(`ต้องการลบ FAQ นี้?\n\n"${key}"`)) return;
+  kbSaving.value = true;
+  kbError.value = null;
+  const name = store.selectedCollection;
+  try {
+    await store.deleteFaqFromCollection(name, key);
+    await store.fetchCollectionStats();
+    await loadKbPreview(name);
+  } catch (err) {
+    kbError.value = err.message;
+  } finally {
+    kbSaving.value = false;
+  }
+};
+
+const loadKbPreview = async (name) => {
+  if (!name) {
+    kbPreviewFaqs.value = [];
+    return;
+  }
+  kbLoading.value = true;
+  try {
+    // Refresh stats (for the vector count) and pull a sample of FAQs.
+    if (store.collectionStats.length === 0) await store.fetchCollectionStats();
+    const faqs = await store.fetchCollectionFaqs(name);
+    // Collapse paraphrase variations: keep one row per original question.
+    const byOriginal = new Map();
+    for (const f of faqs) {
+      const key = f.original_question || f.question;
+      if (!byOriginal.has(key)) byOriginal.set(key, f);
+    }
+    kbPreviewFaqs.value = Array.from(byOriginal.values());
+  } finally {
+    kbLoading.value = false;
+  }
+};
+
+// Reload the preview whenever the user switches mode or picks a different KB.
+watch(
+  () => [store.targetMode, store.selectedCollection, store.statusStep],
+  () => {
+    kbForm.value = null;
+    kbError.value = null;
+    if (showKbPreview.value) loadKbPreview(store.selectedCollection);
+    else kbPreviewFaqs.value = [];
+  },
+  { immediate: true }
+);
+
+const ingestPercent = computed(() => {
+  if (!store.totalChunks) return 0;
+  return Math.round((store.currentChunk / store.totalChunks) * 100);
+});
+
+const ingestStageLabel = computed(() => {
+  if (store.progressStage === "embedding") return "Embedding";
+  return "Expanding question";
+});
+
+const totalPages = computed(() =>
   Math.max(1, Math.ceil(store.extractedFaqs.length / PAGE_SIZE))
 );
-const pagedReview = computed(() => {
-  const start = (reviewPage.value - 1) * PAGE_SIZE;
-  return store.extractedFaqs
-    .slice(start, start + PAGE_SIZE)
-    .map((faq, i) => ({ faq, index: start + i }));
-});
-
-// --- Manage (existing) pagination ---
-const managePage = ref(1);
-const manageTotalPages = computed(() =>
-  Math.max(1, Math.ceil(store.existingFaqs.length / PAGE_SIZE))
+const pageStartIndex = computed(() => (currentPage.value - 1) * PAGE_SIZE);
+const pagedFaqs = computed(() =>
+  store.extractedFaqs.slice(pageStartIndex.value, pageStartIndex.value + PAGE_SIZE)
 );
-const pagedManage = computed(() => {
-  const start = (managePage.value - 1) * PAGE_SIZE;
-  return store.existingFaqs
-    .slice(start, start + PAGE_SIZE)
-    .map((faq, i) => ({ faq, index: start + i }));
-});
 
-// Keep the current page within bounds when the list shrinks (deletes).
-watch(reviewTotalPages, (n) => { if (reviewPage.value > n) reviewPage.value = n; });
-watch(manageTotalPages, (n) => { if (managePage.value > n) managePage.value = n; });
-// Reset to the first page when switching DB.
-watch(() => store.selectedCollection, () => { managePage.value = 1; });
+// Keep currentPage within bounds when the list shrinks (e.g. after delete)
+watch(totalPages, (max) => {
+  if (currentPage.value > max) currentPage.value = max;
+});
 
 const addManualFaq = () => {
   store.extractedFaqs.unshift({
@@ -181,12 +403,8 @@ const addManualFaq = () => {
     filename: "Manual Entry",
     source_type: "Manual",
   });
-  reviewPage.value = 1; // new row is added to the top
-};
-
-const addManualExisting = () => {
-  store.addManualExistingFaq();
-  managePage.value = 1; // new row is added to the top
+  // New entry is prepended — jump to the first page to reveal it
+  currentPage.value = 1;
 };
 
 const deleteFaq = (index) => {
@@ -293,36 +511,288 @@ const submitIngestion = async () => {
   justify-content: center;
 }
 
-.faq-grid-list {
+.faq-grid-scroll {
+  flex: 1;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+  padding-right: 0.5rem;
 }
 
-.pager {
+.faq-pagination {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  margin-top: 1.5rem;
   padding-top: 1.25rem;
+  margin-top: 1rem;
   border-top: 1px solid var(--border-color);
 }
 
-.pager-btn {
+.page-btn {
   min-width: 90px;
   justify-content: center;
 }
 
-.pager-btn:disabled {
-  opacity: 0.45;
+.page-btn:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
-.pager-info {
+.page-info {
   font-size: 0.85rem;
   color: var(--text-secondary);
-  min-width: 200px;
+  min-width: 110px;
   text-align: center;
+}
+
+/* Live progress bar shown during the Expanding & Embedding step */
+.ingest-progress {
+  width: 100%;
+  max-width: 420px;
+  margin: 1.5rem auto 0;
+}
+.ingest-bar-track {
+  width: 100%;
+  height: 8px;
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.ingest-bar-fill {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.ingest-label {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Append-mode Knowledge Base preview --- */
+.kb-preview {
+  padding: 1.5rem;
+  text-align: left;
+}
+.kb-preview-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 1rem;
+}
+.kb-preview-eyebrow {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.kb-preview-name {
+  margin: 0.15rem 0 0;
+  font-size: 1.5rem;
+}
+.kb-header-right {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+}
+.kb-stats {
+  display: flex;
+  gap: 1.5rem;
+}
+.kb-delete-db-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #dc2626;
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 8px;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.kb-delete-db-btn:hover:not(:disabled) { background: rgba(239, 68, 68, 0.18); }
+.kb-delete-db-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.kb-stat {
+  text-align: center;
+}
+.kb-stat-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #3b82f6;
+  font-variant-numeric: tabular-nums;
+}
+.kb-stat-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.kb-preview-hint {
+  margin: 1rem 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+.kb-preview-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+  padding: 2rem 0;
+  justify-content: center;
+}
+.kb-preview-empty {
+  padding: 2rem 0;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.kb-faq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 460px;
+  overflow-y: auto;
+}
+.kb-faq-item {
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  background: var(--bg-secondary, rgba(148, 163, 184, 0.06));
+}
+.kb-faq-q {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.35rem;
+}
+.kb-faq-cat {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.1);
+  border-radius: 6px;
+  padding: 0.1rem 0.4rem;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+.kb-faq-a {
+  font-size: 0.83rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+/* CRUD controls */
+.kb-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.kb-add-btn {
+  flex-shrink: 0;
+  border: 1px solid #3b82f6;
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.08);
+  border-radius: 8px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.kb-add-btn:hover:not(:disabled) { background: rgba(59, 130, 246, 0.16); }
+.kb-add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.kb-faq-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+.kb-faq-main { flex: 1; min-width: 0; }
+.kb-faq-actions {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+.kb-icon-btn {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  border-radius: 6px;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.kb-icon-btn:hover:not(:disabled) { background: rgba(148, 163, 184, 0.15); }
+.kb-icon-btn.danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.12); }
+.kb-icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.kb-form {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  background: var(--bg-secondary, rgba(148, 163, 184, 0.06));
+}
+.kb-form-title { font-weight: 700; margin-bottom: 0.75rem; }
+.kb-form-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin: 0.6rem 0 0.25rem;
+}
+.kb-form-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.9rem;
+  font-family: inherit;
+  background: var(--bg-primary, #fff);
+  resize: vertical;
+}
+.kb-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.kb-btn-ghost,
+.kb-btn-primary {
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.kb-btn-ghost { border: 1px solid var(--border-color); background: transparent; color: var(--text-secondary); }
+.kb-btn-primary { border: none; background: #3b82f6; color: #fff; }
+.kb-btn-primary:disabled,
+.kb-btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+.kb-form-note { margin: 0.6rem 0 0; font-size: 0.72rem; color: var(--text-secondary); }
+.spinner.sm { width: 13px; height: 13px; border-width: 2px; }
+
+.kb-error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #dc2626;
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
 }
 </style>

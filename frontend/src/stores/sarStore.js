@@ -1,8 +1,6 @@
 import { defineStore } from 'pinia'
 
-// Same-origin: API is reverse-proxied under /api by the frontend's nginx (see docker-compose).
-// Override at build time with VITE_API_BASE_URL if the backend lives elsewhere.
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
+const API_BASE_URL = import.meta.env.VITE_API_URL || window.location.origin
 
 export const useSarStore = defineStore('sar', {
   state: () => ({
@@ -22,6 +20,11 @@ export const useSarStore = defineStore('sar', {
     totalFiles: 0,
     processedFiles: 0,
     currentFileName: '',
+
+    // Live chunk-level progress (streamed from backend during extraction)
+    progressStage: '',   // 'extracting' | 'cleaning' | ''
+    currentChunk: 0,
+    totalChunks: 0,
     
     // Staging and settings
     targetMode: 'create', // 'create' or 'append'
@@ -30,12 +33,6 @@ export const useSarStore = defineStore('sar', {
     
     filename: '', // Just for keeping some legacy stuff if needed, though we track multi-files now
     extractedFaqs: [],
-
-    // Managing FAQs that already live in an existing collection
-    managingExisting: false,
-    existingLoading: false,
-    existingFaqs: [],
-    savingExisting: false,
     
     // Cost
     totalExtractionCost: 0.0,
@@ -97,6 +94,73 @@ export const useSarStore = defineStore('sar', {
       }
     },
     
+    async deleteCollection(collectionName) {
+      const response = await fetch(`${API_BASE_URL}/api/v1/collections/${collectionName}/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      })
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}))
+        throw new Error(detail.detail || 'Failed to delete Knowledge Base')
+      }
+      // Refresh state: drop the deleted collection from local lists/selection.
+      if (this.selectedCollection === collectionName) this.selectedCollection = ''
+      await this.fetchCollections()
+      await this.fetchCollectionStats()
+      return await response.json()
+    },
+
+    // --- Manual FAQ CRUD on an existing collection ---
+    async addFaqToCollection(collectionName, faq) {
+      const response = await fetch(`${API_BASE_URL}/api/v1/collections/${collectionName}/faqs/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: faq.category || '',
+          question: faq.question,
+          answer: faq.answer,
+          language: this.language
+        })
+      })
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}))
+        throw new Error(detail.detail || 'Failed to add FAQ')
+      }
+      return await response.json()
+    },
+
+    async editFaqInCollection(collectionName, originalQuestion, faq) {
+      const response = await fetch(`${API_BASE_URL}/api/v1/collections/${collectionName}/faqs/edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          original_question: originalQuestion,
+          category: faq.category || '',
+          question: faq.question,
+          answer: faq.answer,
+          language: this.language
+        })
+      })
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}))
+        throw new Error(detail.detail || 'Failed to edit FAQ')
+      }
+      return await response.json()
+    },
+
+    async deleteFaqFromCollection(collectionName, originalQuestion) {
+      const response = await fetch(`${API_BASE_URL}/api/v1/collections/${collectionName}/faqs/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ original_question: originalQuestion })
+      })
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}))
+        throw new Error(detail.detail || 'Failed to delete FAQ')
+      }
+      return await response.json()
+    },
+
     async createNewCollection(name) {
       this.loading = true
       this.error = null
@@ -131,31 +195,40 @@ export const useSarStore = defineStore('sar', {
       this.processedFiles = 0
       this.extractedFaqs = []
       this.totalExtractionCost = 0.0
-      
+      this.progressStage = ''
+      this.currentChunk = 0
+      this.totalChunks = 0
+
       try {
         for (let i = 0; i < files.length; i++) {
           const file = files[i]
           this.currentFileName = file.name
-          
+          this.progressStage = ''
+          this.currentChunk = 0
+          this.totalChunks = 0
+
           const formData = new FormData()
           formData.append('file', file)
           formData.append('language', this.language)
           formData.append('num_questions', this.numQuestions)
-          
+
           const response = await fetch(`${API_BASE_URL}/api/v1/extract-faq`, {
             method: 'POST',
             body: formData
           })
-          
+
           if (!response.ok) {
-            const detail = await response.json()
-            throw new Error(detail.detail || `Extraction failed for ${file.name}`)
+            let message = `Extraction failed for ${file.name}`
+            try {
+              const detail = await response.json()
+              message = detail.detail || message
+            } catch (_) { /* non-JSON error body (e.g. gateway timeout) */ }
+            throw new Error(message)
           }
-          
-          const data = await response.json()
-          this.extractedFaqs = this.extractedFaqs.concat(data.faqs || [])
-          this.totalExtractionCost += (data.extraction_cost || 0.0)
-          
+
+          // The endpoint streams newline-delimited JSON (NDJSON) progress events.
+          await this._consumeExtractStream(response, file.name)
+
           this.processedFiles += 1
         }
         
@@ -169,9 +242,72 @@ export const useSarStore = defineStore('sar', {
         console.error(err)
         this.error = err.message
         this.statusStep = 0 // Reset
+      } finally {
+        this.progressStage = ''
+        this.currentChunk = 0
+        this.totalChunks = 0
       }
     },
-    
+
+    // Reads the NDJSON stream from /extract-faq, updating live progress state
+    // and collecting the final result. Throws on a streamed error event.
+    async _consumeExtractStream(response, fileName) {
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let gotResult = false
+
+      const handleEvent = (ev) => {
+        switch (ev.type) {
+          case 'chunked':
+            this.progressStage = 'extracting'
+            this.totalChunks = ev.total_chunks || 0
+            this.currentChunk = 0
+            break
+          case 'progress':
+            this.progressStage = ev.stage || this.progressStage
+            this.currentChunk = ev.current || 0
+            this.totalChunks = ev.total || this.totalChunks
+            break
+          case 'status':
+            if (ev.stage === 'rule_extraction') {
+              this.progressStage = 'cleaning'
+              this.currentChunk = 0
+              this.totalChunks = 0
+            }
+            break
+          case 'result':
+            this.extractedFaqs = this.extractedFaqs.concat(ev.faqs || [])
+            this.totalExtractionCost += (ev.extraction_cost || 0.0)
+            gotResult = true
+            break
+          case 'error':
+            throw new Error(ev.detail || `Extraction failed for ${fileName}`)
+        }
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        let newlineIdx
+        while ((newlineIdx = buffer.indexOf('\n')) >= 0) {
+          const rawLine = buffer.slice(0, newlineIdx).trim()
+          buffer = buffer.slice(newlineIdx + 1)
+          if (rawLine) handleEvent(JSON.parse(rawLine))
+        }
+      }
+
+      // Flush any trailing line without a terminating newline.
+      const tail = buffer.trim()
+      if (tail) handleEvent(JSON.parse(tail))
+
+      if (!gotResult) {
+        throw new Error(`Extraction did not complete for ${fileName}`)
+      }
+    },
+
     async processStagedFiles() {
       this.error = null
       
@@ -205,7 +341,10 @@ export const useSarStore = defineStore('sar', {
     async ingestApprovedFaqs(collectionName) {
       this.error = null
       this.statusStep = 4 // Step 4: Embedding & Ingestion
-      
+      this.progressStage = ''
+      this.currentChunk = 0
+      this.totalChunks = 0
+
       try {
         const response = await fetch(`${API_BASE_URL}/api/v1/collections/ingest`, {
           method: 'POST',
@@ -217,149 +356,78 @@ export const useSarStore = defineStore('sar', {
             language: this.language
           })
         })
-        
+
         if (!response.ok) {
-          const detail = await response.json()
-          throw new Error(detail.detail || 'Ingestion failed')
+          let message = 'Ingestion failed'
+          try {
+            const detail = await response.json()
+            message = detail.detail || message
+          } catch (_) { /* non-JSON error body */ }
+          throw new Error(message)
         }
-        
-        const data = await response.json()
-        this.totalExpansionCost = data.expansion_cost || 0.0
-        
+
+        // The endpoint streams newline-delimited JSON (NDJSON) progress events.
+        await this._consumeIngestStream(response)
+
         this.statusStep = 5 // Step 5: Success
         await this.fetchCollections() // Refresh collections list
       } catch (err) {
         console.error(err)
         this.error = err.message
         this.statusStep = 3 // Rollback to review grid on failure
+      } finally {
+        this.progressStage = ''
+        this.currentChunk = 0
+        this.totalChunks = 0
+      }
+    },
+
+    // Reads the NDJSON stream from /collections/ingest, updating live progress
+    // state. Throws on a streamed error event.
+    async _consumeIngestStream(response) {
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let gotResult = false
+
+      const handleEvent = (ev) => {
+        switch (ev.type) {
+          case 'progress':
+            this.progressStage = ev.stage || this.progressStage
+            this.currentChunk = ev.current || 0
+            this.totalChunks = ev.total || this.totalChunks
+            break
+          case 'result':
+            this.totalExpansionCost = ev.expansion_cost || 0.0
+            gotResult = true
+            break
+          case 'error':
+            throw new Error(ev.detail || 'Ingestion failed')
+        }
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        let newlineIdx
+        while ((newlineIdx = buffer.indexOf('\n')) >= 0) {
+          const rawLine = buffer.slice(0, newlineIdx).trim()
+          buffer = buffer.slice(newlineIdx + 1)
+          if (rawLine) handleEvent(JSON.parse(rawLine))
+        }
+      }
+
+      // Flush any trailing line without a terminating newline.
+      const tail = buffer.trim()
+      if (tail) handleEvent(JSON.parse(tail))
+
+      if (!gotResult) {
+        throw new Error('Ingestion did not complete')
       }
     },
     
-    // ---- Manage existing collection FAQs (add / edit / delete) ----
-    async loadExistingFaqs(collectionName) {
-      if (!collectionName) {
-        this.managingExisting = false
-        this.existingFaqs = []
-        return
-      }
-      this.existingLoading = true
-      this.managingExisting = true
-      this.error = null
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/v1/collections/${collectionName}/faqs/grouped`)
-        if (!response.ok) throw new Error('Failed to load existing FAQs')
-        const data = await response.json()
-        this.existingFaqs = (data.faqs || []).map(f => ({
-          point_ids: f.point_ids || [],
-          category: f.category || '',
-          question: f.question || '',
-          answer: f.answer || '',
-          filename: f.filename || '',
-          source_type: f.source_type || 'LLM',
-          _new: false,
-          // snapshot to detect edits on save
-          _orig: JSON.stringify({ category: f.category || '', question: f.question || '', answer: f.answer || '', source_type: f.source_type || 'LLM' })
-        }))
-      } catch (err) {
-        console.error(err)
-        this.error = err.message
-        this.existingFaqs = []
-      } finally {
-        this.existingLoading = false
-      }
-    },
-
-    addManualExistingFaq() {
-      this.existingFaqs.unshift({
-        point_ids: [],
-        category: '',
-        question: '',
-        answer: '',
-        filename: 'Manual Entry',
-        source_type: 'Manual',
-        _new: true,
-        _orig: ''
-      })
-    },
-
-    async deleteExistingFaq(index) {
-      const faq = this.existingFaqs[index]
-      if (!faq) return
-      // Brand-new unsaved row: just drop it locally.
-      if (faq._new || faq.point_ids.length === 0) {
-        this.existingFaqs.splice(index, 1)
-        return
-      }
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/v1/collections/${this.selectedCollection}/faqs/delete`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ point_ids: faq.point_ids })
-        })
-        if (!response.ok) {
-          const detail = await response.json()
-          throw new Error(detail.detail || 'Failed to delete FAQ')
-        }
-        this.existingFaqs.splice(index, 1)
-      } catch (err) {
-        console.error(err)
-        this.error = err.message
-      }
-    },
-
-    existingPendingCount() {
-      return this.existingFaqs.filter(f => {
-        if (f._new) return f.question.trim() || f.answer.trim()
-        const cur = JSON.stringify({ category: f.category, question: f.question, answer: f.answer, source_type: f.source_type })
-        return cur !== f._orig
-      }).length
-    },
-
-    async saveExistingChanges() {
-      // Collect brand-new rows and edited existing rows.
-      const upserts = []
-      for (const f of this.existingFaqs) {
-        if (f._new) {
-          if (!f.question.trim() && !f.answer.trim()) continue // skip empty new rows
-          upserts.push({ point_ids: [], category: f.category, question: f.question, answer: f.answer, filename: f.filename || 'Manual Entry', source_type: f.source_type || 'Manual' })
-        } else {
-          const cur = JSON.stringify({ category: f.category, question: f.question, answer: f.answer, source_type: f.source_type })
-          if (cur !== f._orig) {
-            upserts.push({ point_ids: f.point_ids, category: f.category, question: f.question, answer: f.answer, filename: f.filename || 'Manual Entry', source_type: f.source_type || 'Manual' })
-          }
-        }
-      }
-
-      if (upserts.length === 0) {
-        this.error = 'No new or edited FAQs to save.'
-        return
-      }
-
-      this.savingExisting = true
-      this.error = null
-      try {
-        const response = await fetch(`${API_BASE_URL}/api/v1/collections/${this.selectedCollection}/faqs/save`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ upserts, language: this.language })
-        })
-        if (!response.ok) {
-          const detail = await response.json()
-          throw new Error(detail.detail || 'Failed to save changes')
-        }
-        const data = await response.json()
-        this.successMessage = `Saved ${data.added} entries (${data.replaced} replaced).`
-        setTimeout(() => { this.successMessage = null }, 4000)
-        // Reload to reflect persisted state + fresh point ids.
-        await this.loadExistingFaqs(this.selectedCollection)
-      } catch (err) {
-        console.error(err)
-        this.error = err.message
-      } finally {
-        this.savingExisting = false
-      }
-    },
-
     resetIngestion() {
       this.statusStep = 0
       this.filename = ''
@@ -374,7 +442,7 @@ export const useSarStore = defineStore('sar', {
       this.newDbName = ''
     },
     
-    async queryCollection(collectionName, query, chatHistory = []) {
+    async queryCollection(collectionName, query, chatHistory = [], allowOwnKnowledge = false) {
       this.error = null
       try {
         const response = await fetch(`${API_BASE_URL}/api/v1/query/${collectionName}`, {
@@ -382,7 +450,8 @@ export const useSarStore = defineStore('sar', {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             query,
-            chat_history: chatHistory
+            chat_history: chatHistory,
+            allow_own_knowledge: allowOwnKnowledge
           })
         })
         
