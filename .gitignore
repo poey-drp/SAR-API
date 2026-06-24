@@ -58,3 +58,7 @@ logs/
 .DS_Store?
 ehthumbs.db
 Thumbs.db
+
+# Local-only: agent instructions & handover log
+CLAUDE.md
+task_log.md
