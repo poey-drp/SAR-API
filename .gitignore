@@ -62,3 +62,5 @@ Thumbs.db
 # Local-only: agent instructions & handover log
 CLAUDE.md
 task_log.md
+docs/NOTES.md
+docs/task_log_archive.md
